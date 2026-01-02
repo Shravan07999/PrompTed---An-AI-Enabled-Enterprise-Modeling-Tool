@@ -1,6 +1,9 @@
 fastapi
 uvicorn
 sqlmodel
+sqlalchemy
 pydantic
+google-generativeai
+python-dotenv
 openai
 python-dotenv

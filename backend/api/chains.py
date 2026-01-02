@@ -2,7 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 from typing import List
 from database import get_session
-from models import Chain
+from models import Chain, ChainStep, ChainRead
+from sqlalchemy.orm import selectinload
 
 router = APIRouter(
     prefix="/chains",
@@ -10,17 +11,14 @@ router = APIRouter(
     responses={404: {"description": "Not found"}},
 )
 
-from models import Chain, ChainStep
 
-@router.post("/", response_model=Chain)
+@router.post("/", response_model=ChainRead)
 def create_chain(chain: Chain, session: Session = Depends(get_session)):
-    # Note: This simple create doesn't handle nested steps creation automatically unless we use a Pydantic model with steps
-    # For simplicity, we'll assume the client sends the chain info first, then adds steps, OR we accept a complex object.
-    # Let's keep it simple: Create Chain first.
     session.add(chain)
     session.commit()
     session.refresh(chain)
     return chain
+
 
 @router.post("/{chain_id}/steps", response_model=ChainStep)
 def add_step(chain_id: int, step: ChainStep, session: Session = Depends(get_session)):
@@ -30,17 +28,78 @@ def add_step(chain_id: int, step: ChainStep, session: Session = Depends(get_sess
     session.refresh(step)
     return step
 
-@router.get("/", response_model=List[Chain])
-def read_chains(skip: int = 0, limit: int = 100, session: Session = Depends(get_session)):
-    chains = session.exec(select(Chain).offset(skip).limit(limit)).all()
+
+@router.get("/", response_model=List[ChainRead])
+def read_chains(
+    skip: int = 0, limit: int = 100, session: Session = Depends(get_session)
+):
+    statement = (
+        select(Chain)
+        .offset(skip)
+        .limit(limit)
+        .options(selectinload(Chain.steps).selectinload(ChainStep.prompt))
+    )
+    chains = session.exec(statement).all()
     return chains
 
-@router.get("/{chain_id}", response_model=Chain)
+
+@router.get("/{chain_id}", response_model=ChainRead)
 def read_chain(chain_id: int, session: Session = Depends(get_session)):
-    chain = session.get(Chain, chain_id)
+    statement = (
+        select(Chain)
+        .where(Chain.id == chain_id)
+        .options(selectinload(Chain.steps).selectinload(ChainStep.prompt))
+    )
+    chain = session.exec(statement).first()
     if not chain:
         raise HTTPException(status_code=404, detail="Chain not found")
     return chain
+
+
+@router.patch("/{chain_id}", response_model=ChainRead)
+def update_chain(
+    chain_id: int, chain_data: dict, session: Session = Depends(get_session)
+):
+    db_chain = session.get(Chain, chain_id)
+    if not db_chain:
+        raise HTTPException(status_code=404, detail="Chain not found")
+
+    # Update base fields
+    for key, value in chain_data.items():
+        if key != "steps":
+            setattr(db_chain, key, value)
+
+    # Handle steps if provided
+    if "steps" in chain_data:
+        # Simple implementation: Delete old steps and add new ones
+        from models import ChainStep
+
+        statement = select(ChainStep).where(ChainStep.chain_id == chain_id)
+        old_steps = session.exec(statement).all()
+        for old_step in old_steps:
+            session.delete(old_step)
+
+        for step in chain_data["steps"]:
+            new_step = ChainStep(
+                chain_id=chain_id,
+                prompt_id=step["prompt_id"],
+                order=step["order"],
+                input_mapping=step.get("input_mapping"),
+            )
+            session.add(new_step)
+
+    session.add(db_chain)
+    session.commit()
+    session.refresh(db_chain)
+
+    # Eager load relationships for response
+    statement = (
+        select(Chain)
+        .where(Chain.id == chain_id)
+        .options(selectinload(Chain.steps).selectinload(ChainStep.prompt))
+    )
+    return session.exec(statement).first()
+
 
 @router.delete("/{chain_id}")
 def delete_chain(chain_id: int, session: Session = Depends(get_session)):
