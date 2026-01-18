@@ -71,7 +71,7 @@ def update_chain(
 
     # Handle steps if provided
     if "steps" in chain_data:
-        # Simple implementation: Delete old steps and add new ones
+        # Replace existing steps with new ones
         from models import ChainStep
 
         statement = select(ChainStep).where(ChainStep.chain_id == chain_id)

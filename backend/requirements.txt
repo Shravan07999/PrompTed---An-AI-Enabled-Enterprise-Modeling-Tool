@@ -6,4 +6,4 @@ pydantic
 google-generativeai
 python-dotenv
 openai
-python-dotenv
+

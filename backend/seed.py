@@ -1,176 +1,220 @@
-from sqlmodel import Session, select
+from sqlmodel import Session, select, delete
 from database import engine, create_db_and_tables
-from models import User, UserRole, Prompt, Chain, ChainStep, ExecutionHistory, AuditLog
+from models import Prompt, Chain, ChainStep, User, UserRole
+import json
 
 
-def seed():
-    create_db_and_tables()
-
+def seed_data():
     with Session(engine) as session:
-        # 1. USERS
-        admin = session.exec(select(User).where(User.username == "engineer")).first()
-        if not admin:
-            admin = User(
-                username="engineer",
-                full_name="Edward Engineer",
-                role=UserRole.PROMPT_ENGINEER,
-                hashed_password="hashed_password_placeholder_123",
-            )
-            session.add(admin)
-
-        architect = session.exec(
-            select(User).where(User.username == "architect")
-        ).first()
-        if not architect:
-            architect = User(
-                username="architect",
-                full_name="Alice Architect",
-                role=UserRole.ARCHITECT,
-                hashed_password="hashed_password_placeholder_456",
-            )
-            session.add(architect)
-
-        session.commit()
-        session.refresh(admin)
-        session.refresh(architect)
-
-        # 2. PROMPTS
-        all_prompts = [
-            # GREENSHARE
-            Prompt(
-                name="Greenshare: Sustainability Link",
-                description="Strategy for asset sharing.",
-                template="How does sharing {{equipment}} help ESG?",
-                input_variables="equipment",
-                tags="4EM, Strategy",
-            ),
-            Prompt(
-                name="Greenshare: Technical Inventory",
-                description="Hardware specs for sharing.",
-                template="List sensors for {{equipment}}.",
-                input_variables="equipment",
-                tags="4EM, Technical",
-            ),
-            Prompt(
-                name="Greenshare: Rental Governance",
-                description="Rules for asset sharing.",
-                template="Rules for renting {{equipment}}?",
-                input_variables="equipment",
-                tags="4EM, Governance",
-            ),
-            Prompt(
-                name="Greenshare: Fulfillment Workflow",
-                description="The process flow.",
-                template="Steps to rent {{equipment}}?",
-                input_variables="equipment",
-                tags="4EM, Process",
-            ),
-            # URBANMICROGRID
-            Prompt(
-                name="UrbanMicroGrid: Revenue & ESG Strategy",
-                description="Microgrid strategy.",
-                template="Profit vs ESG for {{neighborhood_name}}.",
-                input_variables="neighborhood_name",
-                tags="4EM, Strategy",
-            ),
-            Prompt(
-                name="UrbanMicroGrid: Smart Grid Specs",
-                description="Microgrid hardware.",
-                template="Hardware for {{neighborhood_name}}?",
-                input_variables="neighborhood_name",
-                tags="4EM, Technical",
-            ),
-            Prompt(
-                name="UrbanMicroGrid: Trading Governance",
-                description="Energy rules.",
-                template="Pricing for {{neighborhood_name}}.",
-                input_variables="neighborhood_name",
-                tags="4EM, Governance",
-            ),
-            Prompt(
-                name="UrbanMicroGrid: Fulfillment Workflow",
-                description="Trading process.",
-                template="How to trade in {{neighborhood_name}}?",
-                input_variables="neighborhood_name",
-                tags="4EM, Process",
-            ),
-        ]
-
-        for p in all_prompts:
-            existing = session.exec(select(Prompt).where(Prompt.name == p.name)).first()
-            if not existing:
-                session.add(p)
-
+        print("--- Clearing Existing Data ---")
+        session.exec(delete(ChainStep))
+        session.exec(delete(Chain))
+        session.exec(delete(Prompt))
         session.commit()
 
-        # 3. CHAINS
-        chains_config = [
-            {
-                "name": "Greenshare: Full 4EM Chain",
-                "prompts": [
-                    "Greenshare: Sustainability Link",
-                    "Greenshare: Technical Inventory",
-                    "Greenshare: Rental Governance",
-                    "Greenshare: Fulfillment Workflow",
-                ],
-            },
-            {
-                "name": "UrbanMicroGrid: End-to-End Logic",
-                "prompts": [
-                    "UrbanMicroGrid: Revenue & ESG Strategy",
-                    "UrbanMicroGrid: Smart Grid Specs",
-                    "UrbanMicroGrid: Trading Governance",
-                    "UrbanMicroGrid: Fulfillment Workflow",
-                ],
-            },
-        ]
+        # Shared Instructions for Visual JSON
+        visual_instruction = """
+        IMPORTANT: At the end of your response, you MUST include a JSON block for the visual diagram.
+        The `nodes` and `edges` lists MUST BE POPULATED with the actual entities and relationships you described.
+        
+        Example JSON Structure:
+        ```json
+        {
+          "visual_flow": {
+            "nodes": [
+              { "id": "n1", "data": { "label": "ENTITY NAME" }, "position": { "x": 0, "y": 0 } }
+            ],
+            "edges": [
+              { "id": "e1", "source": "n1", "target": "n2", "label": "RELATIONSHIP" }
+            ]
+          }
+        }
+        ```
+        """
 
-        for c_cfg in chains_config:
-            existing = session.exec(
-                select(Chain).where(Chain.name == c_cfg["name"])
-            ).first()
-            if not existing:
-                chain = Chain(name=c_cfg["name"], description="Full walkthrough logic.")
-                session.add(chain)
-                session.commit()
-                session.refresh(chain)
+        # 1. Shared Prompts
+        p_context = Prompt(
+            name="Context Extraction & Normalization",
+            description="Extracts actors, goals, processes, and objects.",
+            template="""Analyze the following enterprise scenario and extract entities.
+            Scenario: {{scenario}}
+            Output strictly in JSON: actors, goals, processes, objects, constraints.""",
+            input_variables="scenario",
+            tags="shared",
+        )
+        p_critic = Prompt(
+            name="Critic & Validation",
+            description="Senior architect review.",
+            template="""Act as a senior modeling critic. Review the following architectural model for consistency.
+            Model Content: {{previous_step_output}}
+            List Critical Issues and Suggestions.""",
+            input_variables="framework,previous_step_output",
+            tags="shared",
+        )
+        session.add(p_context)
+        session.add(p_critic)
+        session.commit()
 
-                for i, p_name in enumerate(c_cfg["prompts"]):
-                    p = session.exec(
-                        select(Prompt).where(Prompt.name == p_name)
-                    ).first()
-                    if p:
-                        session.add(
-                            ChainStep(chain_id=chain.id, prompt_id=p.id, order=i + 1)
-                        )
-                session.commit()
+        # 2. 4EM Framework (Using persistent context)
+        p_4em_goal = Prompt(
+            name="4EM Goal Model",
+            template="""Generate a detailed 4EM Goal Model based on the extracted context.
+            Raw Context: {{context_extraction}}
+            Previous Analysis: {{previous_step_output}}
+            - Define a clear goal hierarchy.
+            - Assign responsible Actors.""",
+            input_variables="context_extraction,previous_step_output",
+            tags="4em",
+        )
+        p_4em_process = Prompt(
+            name="4EM Process Model",
+            template=f"""Generate a detailed 4EM Process Model. 
+            Raw Context: {{context_extraction}}
+            - Describe the end-to-end workflow activities.
+            - Identify Actors for each step.
+            
+            {visual_instruction}""",
+            input_variables="context_extraction,previous_step_output",
+            tags="4em",
+        )
+        session.add(p_4em_goal)
+        session.add(p_4em_process)
 
-        # 4. INITIAL HISTORY & AUDIT (for "lived-in" feel)
-        history_check = session.exec(select(ExecutionHistory)).first()
-        if not history_check:
-            p = session.exec(
-                select(Prompt).where(Prompt.name == "Greenshare: Sustainability Link")
-            ).first()
-            if p:
-                h = ExecutionHistory(
-                    prompt_id=p.id,
-                    inputs='{"equipment": "Tesla Harvester"}',
-                    result="Initial strategic approval for Tesla Harvester sharing.",
+        # 3. TOGAF Framework
+        p_togaf_vision = Prompt(
+            name="TOGAF Architecture Vision",
+            template="""Develop a TOGAF Architecture Vision (Phase A).
+            Raw Context: {{context_extraction}}
+            - Define Problem Statement and Strategic Value.""",
+            input_variables="context_extraction,previous_step_output",
+            tags="togaf",
+        )
+        p_togaf_business = Prompt(
+            name="TOGAF Business Architecture",
+            template=f"""Develop the TOGAF Business Architecture (Phase B).
+            Raw Context: {{context_extraction}}
+            Vision Analysis: {{previous_step_output}}
+            - Define Business Services and Organization Units.
+            
+            {visual_instruction}""",
+            input_variables="context_extraction,previous_step_output",
+            tags="togaf",
+        )
+        session.add(p_togaf_vision)
+        session.add(p_togaf_business)
+
+        # 4. ArchiMate Framework
+        p_archimate_layers = Prompt(
+            name="ArchiMate Layering",
+            template="""Map the architecture into ArchiMate Layers:
+            Raw Context: {{context_extraction}}
+            1. Business Layer
+            2. Application Layer
+            3. Technology Layer""",
+            input_variables="context_extraction,previous_step_output",
+            tags="archimate",
+        )
+        p_archimate_rels = Prompt(
+            name="ArchiMate Relationship Mapping",
+            template=f"""Define the ArchiMate Relationships between the layers.
+            Raw Context: {{context_extraction}}
+            Layering Analysis: {{previous_step_output}}
+            
+            {visual_instruction}""",
+            input_variables="context_extraction,previous_step_output",
+            tags="archimate",
+        )
+        session.add(p_archimate_layers)
+        session.add(p_archimate_rels)
+
+        # 5. Zachman Framework
+        p_zachman_matrix = Prompt(
+            name="Zachman Matrix",
+            template="""Produce a Zachman Matrix mapping (6x6).
+            Raw Context: {{context_extraction}}
+            - Fill What, How, Where, Who, When, Why.""",
+            input_variables="context_extraction,previous_step_output",
+            tags="zachman",
+        )
+        p_zachman_perspectives = Prompt(
+            name="Zachman Perspectives",
+            template=f"""Normalize for Planner, Owner, and Designer perspectives.
+            Raw Context: {{context_extraction}}
+            Matrix Analysis: {{previous_step_output}}
+            
+            {visual_instruction}""",
+            input_variables="context_extraction,previous_step_output",
+            tags="zachman",
+        )
+        session.add(p_zachman_matrix)
+        session.add(p_zachman_perspectives)
+
+        session.commit()
+
+        # --- Chains ---
+        def add_steps(chain, prompts):
+            for i, p in enumerate(prompts, 1):
+                mapping = {}
+                if i > 1:
+                    mapping["previous_step_output"] = "result"
+                    mapping["context_extraction"] = "context_extraction"
+                session.add(
+                    ChainStep(
+                        chain_id=chain.id,
+                        prompt_id=p.id,
+                        order=i,
+                        input_mapping=json.dumps(mapping) if mapping else None,
+                    )
                 )
-                session.add(h)
 
-                a = AuditLog(
-                    user_id=architect.id,
-                    action="Executed Model",
-                    target_type="prompt",
-                    target_id=p.id,
-                    details="Baseline sustainability scan completed.",
-                )
-                session.add(a)
+        # 4EM
+        c_4em = Chain(
+            name="4EM Enterprise Alignment",
+            description="Goal-oriented alignment.",
+            framework="4EM",
+        )
+        session.add(c_4em)
+        session.commit()
+        add_steps(c_4em, [p_context, p_4em_goal, p_4em_process, p_critic])
+
+        # TOGAF
+        c_togaf = Chain(
+            name="TOGAF ADM Cycle",
+            description="Standard ADM phases.",
+            framework="TOGAF",
+        )
+        session.add(c_togaf)
+        session.commit()
+        add_steps(c_togaf, [p_context, p_togaf_vision, p_togaf_business, p_critic])
+
+        # ArchiMate
+        c_archimate = Chain(
+            name="ArchiMate Layering",
+            description="Layered view of the enterprise.",
+            framework="ArchiMate",
+        )
+        session.add(c_archimate)
+        session.commit()
+        add_steps(
+            c_archimate, [p_context, p_archimate_layers, p_archimate_rels, p_critic]
+        )
+
+        # Zachman
+        c_zachman = Chain(
+            name="Zachman Matrix",
+            description="Comprehensive classification.",
+            framework="Zachman",
+        )
+        session.add(c_zachman)
+        session.commit()
+        add_steps(
+            c_zachman, [p_context, p_zachman_matrix, p_zachman_perspectives, p_critic]
+        )
 
         session.commit()
-        print("🚀 Codebase Environment Seeded Successfully.")
+        print("Success: All 4 frameworks seeded with PERSISTENT CONTEXT support.")
 
 
 if __name__ == "__main__":
-    seed()
+    create_db_and_tables()
+    seed_data()

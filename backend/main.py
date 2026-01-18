@@ -6,9 +6,6 @@ from api import prompts, chains, execute, auth, analytics
 app = FastAPI(title="Prompt Management Tool API")
 
 
-# Request logging removed for cleaner production output
-
-
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
@@ -36,7 +33,6 @@ def read_root():
     return {"message": "Welcome to the Prompt Management Tool API"}
 
 
-# Health check for system monitoring
 @app.get("/health")
 def health_check():
     return {"status": "ok"}

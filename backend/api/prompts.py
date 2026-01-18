@@ -19,7 +19,7 @@ def create_prompt(prompt: Prompt, session: Session = Depends(get_session)):
 
     # Record Audit
     audit = AuditLog(
-        user_id=2,  # Hardcoded Engineer for demo
+        user_id=2,
         action="Created Prompt",
         target_type="prompt",
         target_id=prompt.id,

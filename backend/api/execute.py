@@ -3,24 +3,43 @@ from pydantic import BaseModel
 from typing import Dict, Any, List
 from sqlmodel import Session, select
 from database import get_session
-from models import Prompt, ExecutionHistory, ExecutionHistoryRead, AuditLog
+from models import (
+    Prompt,
+    ExecutionHistory,
+    ExecutionHistoryRead,
+    AuditLog,
+)
 import json
 import re
 import os
 from sqlalchemy.orm import selectinload
 from dotenv import load_dotenv
-import google.generativeai as genai
+import openai
 
-# Global model rotation - prioritized by expected availability and performance
 _available_models = [
-    "gemini-1.5-flash-8b",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
-    "gemini-1.5-pro",
-    "gemma-3-27b-it",
-    "gemma-3-12b-it",
-    "gemini-pro",
+    "gpt-4o",
+    "gpt-4-turbo",
+    "gpt-3.5-turbo",
 ]
+
+_VISUAL_SCHEMA_INSTRUCTION = """
+IMPORTANT: For visual modelling steps (Process, Business Architecture, ArchiMate, Zachman), you MUST append a JSON block at the VERY END of your response.
+The block MUST follow this exact schema for compatibility with the visual engine:
+
+```json
+{
+  "visual_flow": {
+    "nodes": [
+      { "id": "n1", "type": "actor|process|goal|system", "data": { "label": "NODE_NAME", "description": "Short details" } },
+      { "id": "n2", "type": "actor|process|goal|system", "data": { "label": "NODE_NAME", "description": "Short details" } }
+    ],
+    "edges": [
+      { "id": "e1-2", "source": "n1", "target": "n2", "label": "RELATIONSHIP" }
+    ]
+  }
+}
+```
+"""
 
 
 router = APIRouter(
@@ -34,104 +53,38 @@ class ExecutionRequest(BaseModel):
     inputs: Dict[str, Any]
 
 
+class ChainExecutionRequest(BaseModel):
+    chain_id: int
+    inputs: Dict[str, Any]
+
+
 @router.post("/")
 def execute_prompt(request: ExecutionRequest, session: Session = Depends(get_session)):
-    print(
-        f"🚀 [BACKEND] Executing prompt ID: {request.prompt_id} with inputs: {request.inputs}"
-    )
+    print(f"Executing PROMPT ID: {request.prompt_id} with inputs: {request.inputs}")
 
     prompt = session.get(Prompt, request.prompt_id)
     if not prompt:
         raise HTTPException(status_code=404, detail="Prompt not found")
 
-    # 1. Fill the template with inputs
-    filled_template = prompt.template
-    for key, value in request.inputs.items():
-        pattern = re.compile(r"\{\{\s*" + re.escape(key) + r"\s*\}\}")
-        filled_template = pattern.sub(str(value), filled_template)
+    # Execute Logic
+    result_text = _execute_single_prompt_logic(prompt, request.inputs)
 
-    # 2. Execute via Live LLM (Gemini) or Polish Simulation
-    result_text = ""
-    equipment = "Selected Asset"
-    for k in ["equipment_type", "equipment", "asset", "topic", "neighborhood_name"]:
-        if k in request.inputs and request.inputs[k]:
-            equipment = request.inputs[k]
-            break
-
-    status_header = ""
-    success = False
-
-    # Try models in rotation to handle Quota (429) errors
-    for model_name in _available_models:
-        try:
-            load_dotenv(override=True)
-            key = os.getenv("GEMINI_API_KEY")
-            if not key or "your_key_here" in key:
-                break  # Skip if no key
-
-            genai.configure(api_key=key.strip())
-            model = genai.GenerativeModel(model_name)
-
-            print(f"📡 [AI] Attempting live generation with {model_name}...")
-
-            # Create a professional architectural system prompt
-            system_instruction = (
-                "You are an expert Enterprise Architect acting as an AI Logic Engine. "
-                "The user will provide a template and inputs for a 4EM (Enterprise Modelling) task. "
-                "Your goal is to provide a structured, human-readable architectural blueprint. "
-                "Use professional headers (e.g. ### 🌍 STRATEGY, ### ⚙️ TECHNICAL), bold text for key terms, "
-                "and clear numbered lists. Avoid technical jargon unless necessary for specs. "
-                "Keep the tone authoritative, visionary, and business-ready."
-            )
-
-            full_query = f"{system_instruction}\n\nTask: {prompt.name}\nContext: {filled_template}\n\nGenerate the structured blueprint:"
-            response = model.generate_content(full_query)
-            result_text = response.text
-            status_header = f"### ✅ AI STATUS: LIVE ({model_name})\n\n"
-            success = True
-            print(f"✨ [AI] Success with {model_name}")
-            break
-        except Exception as e:
-            err = str(e)
-            if "429" in err or "quota" in err.lower():
-                print(f"🔄 [AI] Quota hit for {model_name}. Rotating...")
-                continue
-            else:
-                print(f"⚠️ [AI] Error with {model_name}: {err}")
-                continue
-
-    if not success:
-        # Fallback to current polished simulation logic
-        print(
-            "ℹ️ [AI] All models hit limits or key missing. Running in managed simulation mode."
-        )
-        status_header = (
-            "> [!NOTE]\n"
-            "> **Enterprise Mode: Strategic Simulation Active**\n"
-            "> *External AI compute resources are currently managing internal quotas. "
-            "Switching to the verified 4EM Deterministic Logic Engine to ensure consistency.*\n\n"
-        )
-        result_text = run_simulation(prompt.name, equipment, filled_template)
-
-    result_text = status_header + result_text
-
-    # 3. Save to history
+    # Save History
     history = ExecutionHistory(
-        prompt_id=request.prompt_id,
+        prompt_id=prompt.id,
         inputs=json.dumps(request.inputs),
         result=result_text,
     )
     session.add(history)
     session.commit()
-    session.refresh(history)
 
-    # 4. Record Audit
+    # Audit
     audit = AuditLog(
-        user_id=1,  # Hardcoded Architect for demo
-        action="Executed Model",
+        user_id=1,
+        action="Executed Prompt",
         target_type="prompt",
         target_id=prompt.id,
-        details=f"Blueprint generated for {equipment} using pattern: {prompt.name}",
+        details=f"Executed Pattern: {prompt.name}",
     )
     session.add(audit)
     session.commit()
@@ -140,60 +93,415 @@ def execute_prompt(request: ExecutionRequest, session: Session = Depends(get_ses
         "id": history.id,
         "result": result_text,
         "inputs": request.inputs,
-        "filled_prompt": filled_template,
         "created_at": history.created_at,
     }
 
 
+@router.post("/chain")
+def execute_chain(
+    request: ChainExecutionRequest, session: Session = Depends(get_session)
+):
+    print(f"Executing CHAIN ID: {request.chain_id} with inputs: {request.inputs}")
+
+    from models import Chain
+
+    chain = session.get(Chain, request.chain_id)
+    if not chain:
+        raise HTTPException(status_code=404, detail="Chain not found")
+
+    # Sort steps by order
+    steps = sorted(chain.steps, key=lambda s: s.order)
+
+    # Context accumulates outputs from all steps
+    context = request.inputs.copy()
+
+    step_results = []
+    final_output = ""
+
+    for step in steps:
+        print(f"Step {step.order}: Executing {step.prompt.name}...")
+
+        # Prepare inputs for this step
+        step_inputs = {}
+
+        # If input_mapping exists, map context values
+        if step.input_mapping:
+            try:
+                mapping = json.loads(step.input_mapping)
+                for map_key, map_val in mapping.items():
+                    if map_val in context:
+                        step_inputs[map_key] = context[map_val]
+                    else:
+                        step_inputs[map_key] = map_val
+            except Exception as e:
+                print(f"    ⚠️ Mapping error: {e}")
+
+        # Auto-inject all context keys that match prompt input variables
+        if step.prompt.input_variables:
+            needed_vars = [v.strip() for v in step.prompt.input_variables.split(",")]
+            for var in needed_vars:
+                if var not in step_inputs and var in context:
+                    step_inputs[var] = context[var]
+
+        # Execute
+        result_text = _execute_single_prompt_logic(step.prompt, step_inputs)
+
+        # Post-processing
+        result_text = result_text.strip()
+        if result_text.startswith("```markdown") and result_text.endswith("```"):
+            result_text = re.sub(r"^```markdown\s*", "", result_text)
+            result_text = re.sub(r"\s*```$", "", result_text)
+        elif result_text.startswith("```") and result_text.endswith("```"):
+            result_text = re.sub(r"^```\s*", "", result_text)
+            result_text = re.sub(r"\s*```$", "", result_text)
+
+        # Update Context
+        # TRANSIENT KEYS (for immediate next step)
+        context["result"] = result_text
+        context["previous_step_output"] = result_text
+
+        # PERSISTENT KEYS: Store specifically if it is context/extraction
+        low_name = step.prompt.name.lower()
+        if "context" in low_name or "extraction" in low_name:
+            context["context_extraction"] = result_text
+
+        context[f"step_{step.order}_result"] = result_text
+
+        step_type = "CRITIC" if step.is_critic else "GENERATION"
+
+        step_results.append(
+            {
+                "step": step.order,
+                "prompt_name": step.prompt.name,
+                "type": step_type,
+                "result": result_text,
+            }
+        )
+
+        final_output += f"\n\n### Step {step.order}: {step.prompt.name} ({step_type})\n{result_text}"
+
+    # Save History
+    first_prompt_id = steps[0].prompt_id if steps else 0
+    history = ExecutionHistory(
+        prompt_id=first_prompt_id,
+        inputs=json.dumps(request.inputs),
+        result=final_output,
+    )
+    session.add(history)
+    session.commit()
+
+    # Audit
+    audit = AuditLog(
+        user_id=1,
+        action="Executed Chain",
+        target_type="chain",
+        target_id=chain.id,
+        details=f"Executed Framework {chain.framework}: {chain.name}",
+    )
+    session.add(audit)
+    session.commit()
+
+    return {
+        "id": history.id,
+        "result": final_output,
+        "inputs": request.inputs,
+        "steps": step_results,
+        "created_at": history.created_at,
+    }
+
+
+def _execute_single_prompt_logic(prompt: Prompt, inputs: Dict[str, Any]) -> str:
+    """Helper to execute a single prompt without creating history."""
+    # Fill Template
+    filled_template = prompt.template
+    for key, value in inputs.items():
+        pattern = re.compile(r"\{\{\s*" + re.escape(str(key)) + r"\s*\}\}")
+        filled_template = pattern.sub(str(value), filled_template)
+
+    # Execute via Live LLM or Simulation
+    success = False
+    result_text = ""
+    last_error = ""
+
+    # Ensure dotenv is loaded
+    load_dotenv(override=True)
+    key = os.getenv("OPENAI_API_KEY")
+
+    if not key or "your_key_here" in key:
+        print("No valid OPENAI_API_KEY found in environment variables.")
+        return run_simulation(prompt.name, "Asset", filled_template)
+
+    client = openai.OpenAI(api_key=key.strip())
+
+    # System Prompt injection
+    system_instruction = (
+        "You are an expert Enterprise Architect. "
+        "Provide detailed, comprehensive architectural models. "
+        "Output MUST be in markdown. "
+        "Follow the requested format strictly. "
+        "Never wrap your entire response in additional markdown code blocks (backticks)."
+    )
+
+    low_name = prompt.name.lower()
+    if any(
+        k in low_name
+        for k in [
+            "process",
+            "workflow",
+            "layer",
+            "matrix",
+            "archimate",
+            "relationship",
+            "zachman",
+            "goal",
+            "model",
+        ]
+    ):
+        system_instruction += _VISUAL_SCHEMA_INSTRUCTION
+
+    for model_name in _available_models:
+        try:
+            print(f"Attempting model: {model_name}...")
+
+            messages = [
+                {"role": "system", "content": system_instruction},
+                {
+                    "role": "user",
+                    "content": f"Task: {prompt.name}\nContext: {filled_template}",
+                },
+            ]
+
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                temperature=0.2,
+                top_p=0.95,
+            )
+
+            if not response.choices:
+                print(f"  ⚠️ Model {model_name} returned no choices.")
+                continue
+
+            result_text = response.choices[0].message.content
+            success = True
+            print(f"Model {model_name} successful.")
+            break
+        except Exception as e:
+            last_error = str(e)
+            print(f"Model {model_name} failed: {last_error}")
+            continue
+
+    if not success:
+        print(
+            f"All models failed. Falling back to simulation. Last error: {last_error}"
+        )
+        # Inject the error into the result so the user knows WHY it is simulated
+        simulation_data = run_simulation(prompt.name, "Asset", filled_template)
+        result_text = f"> [!WARNING]\n> **AI Offline (Limit Exceeded)**: Falling back to Local Managed Simulation.\n\n{simulation_data}"
+
+    return result_text
+
+
 def run_simulation(name: str, equipment: str, filled_template: str) -> str:
-    """The polished deterministic engine to ensure high-quality outputs without an API key."""
     name_low = name.lower()
 
-    if "sustainability" in name_low or "strategy" in name_low:
-        return (
-            f"### 🌍 BUSINESS STRATEGY: HOW THIS HELPS THE PLANET & PROFIT\n"
-            f"**Focus Area:** {equipment}\n\n"
-            f"1. **Strategic Impact:** By optimizing the distribution and usage of {equipment}, we achieve a 30% reduction in unnecessary regional energy/resource consumption.\n"
-            f"2. **Circular Economy:** This approach turns {equipment} from a single-user asset into a community-shared resource, maximizing its ROI.\n"
-            f"3. **Long-Term Value:** This model prepares the organization for future ESG regulations and attracts environmentally-conscious investors."
+    # Try to extract some context from any available input to make it feel less "generic"
+    discovered_nodes = []
+
+    # Attempt to find nouns or capitalized words as pseudo-nodes
+    words = re.findall(r"([A-Z][a-z]+(?:\s[A-Z][a-z]+)*)", filled_template)
+    if words:
+        discovered_nodes = list(
+            set(
+                [
+                    w
+                    for w in words
+                    if len(w) > 3
+                    and w
+                    not in [
+                        "Scenario",
+                        "Analyze",
+                        "Task",
+                        "Context",
+                        "Output",
+                        "Nexus",
+                        "Cargo",
+                    ]
+                ]
+            )
         )
 
-    elif "technical" in name_low or "spec" in name_low:
-        return (
-            f"### ⚙️ TECHNICAL BLUEPRINT: CORE INFRASTRUCTURE REQUIREMENTS\n"
-            f"**Asset/System:** {equipment}\n\n"
-            f"To deploy the {equipment} system successfully, the following 3 nodes must be fully integrated:\n\n"
-            f"- **Smart Synchronization Node:** A high-speed digital controller that balances {equipment} load in real-time.\n"
-            f"- **Telemetry/Sensor Array:** Precision sensors to monitor the health and output of the {equipment} 24/7.\n"
-            f"- **Secure Gateway:** A military-grade encrypted connection to ensure that all data from the {equipment} is safe from cyber threats."
+    def get_type(node_name: str) -> str:
+        ln = node_name.lower()
+        if any(
+            x in ln
+            for x in [
+                "manager",
+                "actor",
+                "fleet",
+                "hub",
+                "stakeholder",
+                "authority",
+                "driver",
+                "sponsor",
+            ]
+        ):
+            return "actor"
+        if any(
+            x in ln
+            for x in [
+                "iot",
+                "sensor",
+                "controller",
+                "system",
+                "database",
+                "app",
+                "server",
+                "nexus",
+                "cargo",
+            ]
+        ):
+            return "system"
+        if any(
+            x in ln for x in ["goal", "target", "objective", "reduction", "footprint"]
+        ):
+            return "goal"
+        return "process"
+
+    # Limit to 5 for simulation simplicity
+    discovered_nodes = discovered_nodes[:5]
+
+    if "context" in name_low or "extraction" in name_low:
+        return json.dumps(
+            {
+                "actors": discovered_nodes
+                if discovered_nodes
+                else ["Executive Sponsor", "Operations Manager"],
+                "goals": ["Optimize Performance", "Reduce Operational Risk"],
+                "processes": ["Core Business Process", "Exception Handling"],
+            },
+            indent=2,
         )
 
-    elif "governance" in name_low or "rules" in name_low:
-        return (
-            f"### 🛡️ SAFETY & BUSINESS RULES: OPERATIONAL GOVERNANCE\n"
-            f"**Focus:** Managing the {equipment} Network\n\n"
-            f"Here are the core rules the system will automatically enforce via the 4EM logic engine:\n\n"
-            f"1. **AUTOMATIC FAILSAFE:** If any sensor in the {equipment} network reports a critical fault, the system triggers an emergency shutdown in < 50ms.\n"
-            f"2. **CAPACITY LIMITS:** The system will prevent any single user from using more than 40% of the {equipment}'s total capacity during peak hours.\n"
-            f"3. **VERIFIED LOGGING:** Every transaction or move made by the {equipment} is recorded in an immutable ledger for audit purposes."
-        )
+    if "goal" in name_low:
+        return f"### 4EM Goal Model (Simulated)\n- **Strategic Goal**: {discovered_nodes[0] if len(discovered_nodes) > 0 else 'Excellence'}\n- **Operational Goal**: {discovered_nodes[1] if len(discovered_nodes) > 1 else 'Efficiency'}"
 
-    elif "workflow" in name_low or "fulfillment" in name_low or "process" in name_low:
-        return (
-            f"### 📈 BUSINESS PROCESS: THE 4-STEP JOURNEY\n"
-            f"**Operation:** {equipment} Deployment\n\n"
-            f"This blueprint shows the end-to-end operational flow for {equipment}:\n\n"
-            f"1. **ONBOARDING:** New users or assets are registered into the {equipment} digital twin environment.\n"
-            f"2. **VALIDATION:** The system checks all 'Safety Rules' (from governance) to ensure the {equipment} is ready for use.\n"
-            f"3. **EXECUTION:** The {equipment} performs its primary function while telemetry data is steamed live to the dashboard.\n"
-            f"4. **OPTIMIZATION:** After use, the system generates an AI-driven report on how to improve {equipment} performance for the next cycle."
-        )
+    # Specific simulation for ArchiMate Layering
+    if "archimate" in name_low and "layer" in name_low:
+        # Sort nodes by type for better layering
+        actors = [n for n in discovered_nodes if get_type(n) == "actor"]
+        procs = [n for n in discovered_nodes if get_type(n) == "process"]
+        systems = [n for n in discovered_nodes if get_type(n) == "system"]
+
+        # Fallbacks
+        n1 = actors[0] if actors else "Business Actor"
+        n2 = procs[0] if procs else "Core Process"
+        n3 = systems[0] if systems else "IoT Infrastructure"
+
+        return f"""### ArchiMate Layering (Simulated)
+This model maps the architecture into Business, Application, and Technology layers.
+
+#### Identified Elements:
+1.  **Business Layer**: {n1} - Human or organizational entities.
+2.  **Application Layer**: {n2} - Logical process and software services.
+3.  **Technology Layer**: {n3} - Physical devices and networks.
+
+```json
+{{
+  "visual_flow": {{
+    "nodes": [
+      {{ "id": "b1", "type": "actor", "data": {{ "label": "{n1}", "description": "Key business stakeholder" }} }},
+      {{ "id": "a1", "type": "process", "data": {{ "label": "{n2}", "description": "Operational workflow" }} }},
+      {{ "id": "t1", "type": "system", "data": {{ "label": "{n3}", "description": "Technological realization" }} }}
+    ],
+    "edges": [
+      {{ "id": "e1", "source": "b1", "target": "a1", "label": "Uses" }},
+      {{ "id": "e2", "source": "a1", "target": "t1", "label": "Realized by" }}
+    ]
+  }}
+}}
+```
+"""
+
+    # Specific simulation for ArchiMate Relationship Mapping
+    if "archimate" in name_low and "relationship" in name_low:
+        systems = [n for n in discovered_nodes if get_type(n) == "system"]
+        procs = [n for n in discovered_nodes if get_type(n) == "process"]
+
+        n1 = procs[0] if procs else "Gateway Interface"
+        n2 = systems[0] if systems else "Legacy DB"
+
+        return f"""### ArchiMate Relationships (Simulated)
+Detailed mapping of cross-layer dependencies.
+
+```json
+{{
+  "visual_flow": {{
+    "nodes": [
+      {{ "id": "n1", "type": "process", "data": {{ "label": "{n1}", "description": "Operational Interface" }} }},
+      {{ "id": "n2", "type": "system", "data": {{ "label": "{n2}", "description": "Backend realization" }} }}
+    ],
+    "edges": [
+      {{ "id": "e1-2", "source": "n1", "target": "n2", "label": "Serving" }}
+    ]
+  }}
+}}
+```
+"""
+
+    if "process" in name_low or "workflow" in name_low:
+        nlist = [n for n in discovered_nodes if get_type(n) == "process"]
+        s1 = nlist[0] if len(nlist) > 0 else "Trigger Event"
+        s2 = nlist[1] if len(nlist) > 1 else "Core Task"
+        s3 = nlist[2] if len(nlist) > 2 else "Completion"
+        return f"""### Process Model (Simulated)
+Workflow generated based on scenario keywords.
+
+```json
+{{
+  "visual_flow": {{
+    "nodes": [
+      {{ "id": "1", "type": "process", "data": {{ "label": "{s1}", "description": "Starting phase" }} }},
+      {{ "id": "2", "type": "process", "data": {{ "label": "{s2}", "description": "Core analysis" }} }},
+      {{ "id": "3", "type": "process", "data": {{ "label": "{s3}", "description": "Output generation" }} }}
+    ],
+    "edges": [
+      {{ "id": "e1-2", "source": "1", "target": "2" }},
+      {{ "id": "e2-3", "source": "2", "target": "3" }}
+    ]
+  }}
+}}
+```
+"""
+
+    if "zachman" in name_low and "matrix" in name_low:
+        return """### Zachman Matrix (Simulated)
+Classification across 6 interrogatives and 6 perspectives.
+
+```json
+{
+  "visual_flow": {
+    "nodes": [
+      { "id": "z1", "type": "process", "data": { "label": "Executive View", "description": "Planner Perspective" } },
+      { "id": "z2", "type": "process", "data": { "label": "Business View", "description": "Owner Perspective" } }
+    ],
+    "edges": [
+      { "id": "ez1", "source": "z1", "target": "z2", "label": "Determines" }
+    ]
+  }
+}
+```
+"""
+    if "vision" in name_low:
+        return "### TOGAF Vision (Simulated)\nStrategic alignment of IT with business goals. High-level roadmap for digital transformation."
+
+    if "critic" in name_low:
+        return "### Validation Report (Simulated)\n- ✅ Model structure is sound.\n- ⚠️ Suggestion: Detail cross-layer mappings for ArchiMate compliance."
 
     return (
-        f"### 📋 PRELIMINARY BUSINESS ANALYSIS\n"
-        f"Analysis for: {name} involving {equipment}\n\n"
-        f"{filled_template}\n\n"
-        f"*(Context derived from 4EM Generative Model. This model provides an architectural foundation for {equipment})*"
+        f"### Simulation Output for {name}\n"
+        f"Generate architectural content for: {filled_template[:100]}...\n"
+        f"(Simulated deterministic output)"
     )
 
 

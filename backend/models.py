@@ -44,6 +44,9 @@ class Prompt(PromptBase, table=True):
 class ChainBase(SQLModel):
     name: str = Field(index=True)
     description: Optional[str] = None
+    framework: str = Field(
+        default="General", index=True
+    )  # e.g., "4EM", "TOGAF", "ArchiMate", "Zachman"
 
 
 class Chain(ChainBase, table=True):
@@ -59,6 +62,8 @@ class ChainStepBase(SQLModel):
     prompt_id: int = Field(foreign_key="prompt.id")
     order: int
     input_mapping: Optional[str] = None  # JSON string mapping outputs to inputs
+    is_critic: bool = Field(default=False)
+    output_schema: Optional[str] = None  # Pydantic model name for validation
 
 
 class ChainStep(ChainStepBase, table=True):
