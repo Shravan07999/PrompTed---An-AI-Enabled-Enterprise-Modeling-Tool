@@ -12,7 +12,7 @@ def seed_data():
         session.exec(delete(Prompt))
         session.commit()
 
-        # Shared Instructions for Visual JSON
+        # Instructions for Visual JSON
         visual_instruction = """
         IMPORTANT: At the end of your response, you MUST include a JSON block for the visual diagram.
         The `nodes` and `edges` lists MUST BE POPULATED with the actual entities and relationships you described.

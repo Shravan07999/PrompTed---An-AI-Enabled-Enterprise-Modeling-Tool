@@ -496,7 +496,7 @@ Classification across 6 interrogatives and 6 perspectives.
         return "### TOGAF Vision (Simulated)\nStrategic alignment of IT with business goals. High-level roadmap for digital transformation."
 
     if "critic" in name_low:
-        return "### Validation Report (Simulated)\n- ✅ Model structure is sound.\n- ⚠️ Suggestion: Detail cross-layer mappings for ArchiMate compliance."
+        return "### Validation Report (Simulated)\n-  Model structure is sound.\n-  Suggestion: Detail cross-layer mappings for ArchiMate compliance."
 
     return (
         f"### Simulation Output for {name}\n"

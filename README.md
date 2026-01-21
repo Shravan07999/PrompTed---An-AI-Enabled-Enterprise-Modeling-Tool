@@ -17,3 +17,9 @@ A tool for managing prompts and prompt chains, executing them against LLMs, and 
 1. Navigate to `frontend/`
 2. `npm install`
 3. Run dev server: `npm run dev`
+
+
+Participants:
+- Shravan Navaneeth Kumar
+- Mohammad Akmal Hassan
+- Nour Aouadi
