@@ -134,7 +134,7 @@ def execute_chain(
                     else:
                         step_inputs[map_key] = map_val
             except Exception as e:
-                print(f"    ⚠️ Mapping error: {e}")
+                print(f"     Mapping error: {e}")
 
         # Auto-inject all context keys that match prompt input variables
         if step.prompt.input_variables:
@@ -279,7 +279,7 @@ def _execute_single_prompt_logic(prompt: Prompt, inputs: Dict[str, Any]) -> str:
             )
 
             if not response.choices:
-                print(f"  ⚠️ Model {model_name} returned no choices.")
+                print(f"   Model {model_name} returned no choices.")
                 continue
 
             result_text = response.choices[0].message.content
